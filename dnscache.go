@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rs/dnscache/internal/singleflight"
+	"github.com/wakumaku/dnscache/internal/singleflight"
 )
 
 type Resolver struct {
@@ -17,9 +17,7 @@ type Resolver struct {
 	// net.DefaultResolver is used instead.
 	Resolver *net.Resolver
 
-	once  sync.Once
-	mu    sync.RWMutex
-	cache map[string]*cacheEntry
+	cache sync.Map
 
 	onCacheMiss func()
 }
@@ -33,39 +31,32 @@ type cacheEntry struct {
 // LookupAddr performs a reverse lookup for the given address, returning a list
 // of names mapping to that address.
 func (r *Resolver) LookupAddr(ctx context.Context, addr string) (names []string, err error) {
-	r.once.Do(r.init)
 	return r.lookup(ctx, "r"+addr)
 }
 
 // LookupHost looks up the given host using the local resolver. It returns a
 // slice of that host's addresses.
 func (r *Resolver) LookupHost(ctx context.Context, host string) (addrs []string, err error) {
-	r.once.Do(r.init)
 	return r.lookup(ctx, "h"+host)
+}
+
+// LookupMX .
+func (r *Resolver) LookupMX(ctx context.Context, host string) (addrs []string, err error) {
+	return r.lookup(ctx, "m"+host)
 }
 
 // Refresh refreshes cached entries which has been used at least once since the
 // last Refresh. If clearUnused is true, entries which hasn't be used since the
 // last Refresh are removed from the cache.
 func (r *Resolver) Refresh(clearUnused bool) {
-	r.once.Do(r.init)
-	r.mu.RLock()
-	update := make([]string, 0, len(r.cache))
-	for key, entry := range r.cache {
-		if entry.used {
-			update = append(update, key)
-		} else if clearUnused {
-			delete(r.cache, key)
+	r.cache.Range(func(key interface{}, value interface{}) bool {
+		if !value.(*cacheEntry).used && clearUnused {
+			r.cache.Delete(key)
+			return true
 		}
-	}
-	r.mu.RUnlock()
-	for _, key := range update {
-		r.update(context.Background(), key, false)
-	}
-}
-
-func (r *Resolver) init() {
-	r.cache = make(map[string]*cacheEntry)
+		r.update(context.Background(), key.(string), false)
+		return true
+	})
 }
 
 // lookupGroup merges lookup calls together for lookups for the same host. The
@@ -109,9 +100,7 @@ func (r *Resolver) update(ctx context.Context, key string, used bool) (rrs []str
 		if err == nil {
 			rrs, _ = res.Val.([]string)
 		}
-		r.mu.Lock()
-		r.storeLocked(key, rrs, used, err)
-		r.mu.Unlock()
+		r.store(key, rrs, used, err)
 	}
 	return
 }
@@ -139,6 +128,12 @@ func (r *Resolver) lookupFunc(key string) func() (interface{}, error) {
 			defer cancel()
 			return resolver.LookupAddr(ctx, key[1:])
 		}
+	case 'm':
+		return func() (interface{}, error) {
+			ctx, cancel := r.getCtx()
+			defer cancel()
+			return resolver.LookupMX(ctx, key[1:])
+		}
 	default:
 		panic("lookupFunc invalid key type: " + key)
 	}
@@ -155,36 +150,22 @@ func (r *Resolver) getCtx() (ctx context.Context, cancel context.CancelFunc) {
 }
 
 func (r *Resolver) load(key string) (rrs []string, err error, found bool) {
-	r.mu.RLock()
-	var entry *cacheEntry
-	entry, found = r.cache[key]
+	entry, found := r.cache.Load(key)
 	if !found {
-		r.mu.RUnlock()
 		return
 	}
-	rrs = entry.rrs
-	err = entry.err
-	used := entry.used
-	r.mu.RUnlock()
+
+	rrs = entry.(*cacheEntry).rrs
+	err = entry.(*cacheEntry).err
+	used := entry.(*cacheEntry).used
+
 	if !used {
-		r.mu.Lock()
-		entry.used = true
-		r.mu.Unlock()
+		r.store(key, rrs, used, err)
 	}
+
 	return rrs, err, true
 }
 
-func (r *Resolver) storeLocked(key string, rrs []string, used bool, err error) {
-	if entry, found := r.cache[key]; found {
-		// Update existing entry in place
-		entry.rrs = rrs
-		entry.err = err
-		entry.used = used
-		return
-	}
-	r.cache[key] = &cacheEntry{
-		rrs:  rrs,
-		err:  err,
-		used: used,
-	}
+func (r *Resolver) store(key string, rrs []string, used bool, err error) {
+	r.cache.Store(key, &cacheEntry{rrs: rrs, err: err, used: used})
 }

@@ -43,15 +43,15 @@ func TestResolver_LookupHost(t *testing.T) {
 func TestClearCache(t *testing.T) {
 	r := &Resolver{}
 	_, _ = r.LookupHost(context.Background(), "google.com")
-	if e := r.cache["hgoogle.com"]; e != nil && !e.used {
+	if e, _ := r.cache.Load("hgoogle.com"); e != nil && !e.(*cacheEntry).used {
 		t.Error("cache entry used flag is false, want true")
 	}
 	r.Refresh(true)
-	if e := r.cache["hgoogle.com"]; e != nil && e.used {
+	if e, _ := r.cache.Load("hgoogle.com"); e != nil && e.(*cacheEntry).used {
 		t.Error("cache entry used flag is true, want false")
 	}
 	r.Refresh(true)
-	if e := r.cache["hgoogle.com"]; e != nil {
+	if e, _ := r.cache.Load("hgoogle.com"); e != nil {
 		t.Error("cache entry is not cleared")
 	}
 }
